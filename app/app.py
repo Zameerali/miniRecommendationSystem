@@ -5,6 +5,7 @@ import random
 from surprise import SVD, Dataset, Reader
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+import os
 
 # Set page title and layout
 st.title("Stress Relief Recommender")
@@ -59,6 +60,54 @@ def content_based_recommend(mood, tfidf, tfidf_matrix, df_liked, n=3):
     top_indices = similarities.argsort()[-n:][::-1]
     return df_liked.iloc[top_indices]['activity'].tolist()
 
+# LinUCB Bandit Implementation
+class LinUCBBandit:
+    def __init__(self, arms, context_dim, alpha=1.0):
+        self.arms = arms
+        self.context_dim = context_dim
+        self.alpha = alpha
+        self.A = {arm: np.identity(context_dim) for arm in arms}
+        self.b = {arm: np.zeros(context_dim) for arm in arms}
+
+    def select_arm(self, context):
+        ucb_values = {}
+        for arm in self.arms:
+            A_inv = np.linalg.inv(self.A[arm])
+            theta = np.dot(A_inv, self.b[arm])
+            ucb = np.dot(theta, context) + self.alpha * np.sqrt(np.dot(context.T, np.dot(A_inv, context)))
+            ucb_values[arm] = ucb
+        return max(ucb_values, key=ucb_values.get)
+
+    def update(self, arm, context, reward):
+        self.A[arm] += np.outer(context, context)
+        self.b[arm] += reward * context
+
+# Train Bandit
+@st.cache_resource
+def train_bandit():
+    activities = ['meditation', 'music', 'journaling', 'breathing', 'walking']
+    context_dim = 4  # 2 for mood (anxious, calm), 2 for stress_level (high, low)
+    bandit = LinUCBBandit(activities, context_dim, alpha=1.0)
+    # Train on historical data
+    np.random.seed(42)
+    for _, row in df.iterrows():
+        context = get_context(row['mood'], row['stress_level'])
+        arm = row['activity']
+        reward = row['feedback']
+        bandit.update(arm, context, reward)
+    return bandit
+
+# Context for Bandit
+def get_context(mood, stress_level):
+    mood_vec = [1 if mood == 'anxious' else 0, 1 if mood == 'calm' else 0]
+    stress_vec = [1 if stress_level == 'high' else 0, 1 if stress_level == 'low' else 0]
+    return np.array(mood_vec + stress_vec)
+
+# Feedback file
+feedback_file = 'data/feedback.csv'
+if not os.path.exists(feedback_file):
+    pd.DataFrame(columns=['user_id', 'mood', 'stress_level', 'activity', 'feedback']).to_csv(feedback_file, index=False)
+
 # User input
 mood = st.selectbox("Select your mood:", ["calm", "anxious"])
 stress_level = st.selectbox("Select your stress level:", ["low", "high"])
@@ -67,6 +116,7 @@ user_id = st.number_input("Enter user ID (1-50):", min_value=1, max_value=50, va
 # Load models
 svd_model = train_svd_model()
 tfidf, tfidf_matrix, df_liked = train_tfidf_model()
+bandit = train_bandit()
 activities = ['meditation', 'music', 'journaling', 'breathing', 'walking']
 
 # Display recommendations
@@ -74,12 +124,14 @@ if st.button("Get Recommendations"):
     st.subheader("Recommendations")
     
     # Random Baseline
+    random_rec = random_baseline()
     st.write("**Random Baseline**")
-    st.write(random_baseline())
+    st.write(random_rec)
     
     # Popularity Baseline
+    pop_rec = popularity_baseline(df)
     st.write("**Popularity Baseline**")
-    st.write(popularity_baseline(df))
+    st.write(pop_rec)
     
     # SVD Recommendations
     st.write("**SVD (Collaborative Filtering)**")
@@ -92,10 +144,39 @@ if st.button("Get Recommendations"):
     tfidf_recs = content_based_recommend(mood, tfidf, tfidf_matrix, df_liked)
     for i, rec in enumerate(tfidf_recs, 1):
         st.write(f"{i}. {rec}")
+    
+    # Bandit Recommendation
+    st.write("**LinUCB Bandit**")
+    context = get_context(mood, stress_level)
+    bandit_rec = bandit.select_arm(context)
+    st.write(bandit_rec)
+
+    # Real-time feedback
+    st.subheader("Provide Feedback")
+    feedback_activity = st.selectbox("Select the activity you tried:", activities + [random_rec, pop_rec, bandit_rec] + svd_recs + tfidf_recs, index=0)
+    feedback_value = st.radio("Did you like it?", (1, 0))
+    if st.button("Submit Feedback"):
+        new_feedback = pd.DataFrame({
+            'user_id': [user_id],
+            'mood': [mood],
+            'stress_level': [stress_level],
+            'activity': [feedback_activity],
+            'feedback': [feedback_value]
+        })
+        new_feedback.to_csv(feedback_file, mode='a', header=False, index=False)
+        # Update bandit in real-time
+        context = get_context(mood, stress_level)
+        bandit.update(feedback_activity, context, feedback_value)
+        st.success("Feedback submitted! Bandit updated.")
+        # Reload data for other models (optional, as retraining may be heavy)
+        # global df
+        df = pd.concat([df, new_feedback], ignore_index=True)
+        st.cache_data.clear()
+        st.cache_resource.clear()
 
 # Instructions for Git
 # Save this file (Ctrl+S in VS Code)
 # Commit to Git (run in terminal):
 # git add app/app.py
-# git commit -m "Implemented Streamlit UI for recommendations"
+# git commit -m "Added real-time feedback to Streamlit UI"
 # git push
