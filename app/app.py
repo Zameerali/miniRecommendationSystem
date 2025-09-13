@@ -2,9 +2,9 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import random
-from surprise import SVD, Dataset, Reader
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+from scipy.sparse.linalg import svds  # For pure-Python SVD
 import os
 
 # Set page title and layout
@@ -28,21 +28,39 @@ def popularity_baseline(df):
     activity_scores = df.groupby('activity')['feedback'].sum().sort_values(ascending=False)
     return activity_scores.index[0]
 
-# SVD Model
+# Pure-Python SVD Collaborative Filtering (Matrix Factorization)
 @st.cache_resource
-def train_svd_model():
-    reader = Reader(rating_scale=(0, 1))
-    data = Dataset.load_from_df(df[['user_id', 'activity', 'feedback']], reader)
-    trainset = data.build_full_trainset()
-    model = SVD(n_factors=10, random_state=42)
-    model.fit(trainset)
-    return model
+def train_custom_svd(train_df, n_factors=10):
+    # Create user-item matrix (feedback as ratings)
+    users = train_df['user_id'].unique()
+    items = train_df['activity'].unique()
+    user_to_idx = {u: i for i, u in enumerate(users)}
+    item_to_idx = {i: j for j, i in enumerate(items)}
+    n_users, n_items = len(users), len(items)
+    
+    # Build sparse matrix
+    matrix = np.zeros((n_users, n_items))
+    for _, row in train_df.iterrows():
+        u_idx = user_to_idx[row['user_id']]
+        i_idx = item_to_idx[row['activity']]
+        matrix[u_idx, i_idx] = row['feedback']
+    
+    # SVD decomposition (using scipy)
+    U, sigma, Vt = svds(matrix, k=min(n_factors, min(matrix.shape) - 1))
+    # Reconstruct predicted ratings
+    predicted = np.dot(np.dot(U, np.diag(sigma)), Vt)
+    
+    return predicted, user_to_idx, item_to_idx, items
 
-# SVD Recommendations
-def recommend_svd(user_id, model, activities, n=3):
-    predictions = [(activity, model.predict(user_id, activity).est) for activity in activities]
-    predictions.sort(key=lambda x: x[1], reverse=True)
-    return [activity for activity, _ in predictions[:n]]
+def recommend_custom_svd(user_id, predicted, user_to_idx, item_to_idx, items, n=3):
+    if user_id not in user_to_idx:
+        return random.sample(list(items), n)  # Fallback for new users
+    
+    u_idx = user_to_idx[user_id]
+    user_ratings = predicted[u_idx]
+    # Get top n items with highest predicted ratings
+    top_items_idx = np.argsort(user_ratings)[::-1][:n]
+    return [items[i] for i in top_items_idx]
 
 # TF-IDF Content-Based Model
 @st.cache_resource
@@ -114,7 +132,7 @@ stress_level = st.selectbox("Select your stress level:", ["low", "high"])
 user_id = st.number_input("Enter user ID (1-50):", min_value=1, max_value=50, value=1)
 
 # Load models
-svd_model = train_svd_model()
+predicted, user_to_idx, item_to_idx, items = train_custom_svd(df)  # Full data for training
 tfidf, tfidf_matrix, df_liked = train_tfidf_model()
 bandit = train_bandit()
 activities = ['meditation', 'music', 'journaling', 'breathing', 'walking']
@@ -133,9 +151,9 @@ if st.button("Get Recommendations"):
     st.write("**Popularity Baseline**")
     st.write(pop_rec)
     
-    # SVD Recommendations
-    st.write("**SVD (Collaborative Filtering)**")
-    svd_recs = recommend_svd(user_id, svd_model, activities)
+    # Custom SVD Recommendations
+    st.write("**Custom SVD (Collaborative Filtering)**")
+    svd_recs = recommend_custom_svd(user_id, predicted, user_to_idx, item_to_idx, items)
     for i, rec in enumerate(svd_recs, 1):
         st.write(f"{i}. {rec}")
     
@@ -168,8 +186,7 @@ if st.button("Get Recommendations"):
         context = get_context(mood, stress_level)
         bandit.update(feedback_activity, context, feedback_value)
         st.success("Feedback submitted! Bandit updated.")
-        # Reload data for other models (optional, as retraining may be heavy)
-        # global df
+        # Reload data for other models (optional)
         df = pd.concat([df, new_feedback], ignore_index=True)
         st.cache_data.clear()
         st.cache_resource.clear()
@@ -177,6 +194,6 @@ if st.button("Get Recommendations"):
 # Instructions for Git
 # Save this file (Ctrl+S in VS Code)
 # Commit to Git (run in terminal):
-# git add app/app.py
-# git commit -m "Added real-time feedback to Streamlit UI"
+# git add app/app.py requirements.txt
+# git commit -m "Replaced scikit-surprise with pure-Python SVD using scipy"
 # git push
