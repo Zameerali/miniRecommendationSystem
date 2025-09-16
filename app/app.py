@@ -225,14 +225,4 @@ if 'recommendations' in st.session_state:
         if feedback_activity in bandit.arms:
             bandit.update(feedback_activity, context, feedback_value)
         st.success("Feedback submitted! Bandit updated.")
-        # Reload data for other models (optional)
-        df = pd.concat([df, new_feedback], ignore_index=True)
-        st.cache_data.clear()
-        st.cache_resource.clear()
 
-# Instructions for Git
-# Save this file (Ctrl+S in VS Code)
-# Commit to Git (run in terminal):
-# git add app/app.py requirements.txt
-# git commit -m "Replaced scikit-surprise with pure-Python SVD using scipy"
-# git push
